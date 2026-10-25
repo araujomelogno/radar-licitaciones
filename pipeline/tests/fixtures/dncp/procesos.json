@@ -1,0 +1,12 @@
+{"pagination":{"total_items":2,"total_pages":1,"current_page":1},
+ "records":[
+  {"compiledRelease":{"ocid":"ocds-03ad3f-445566","date":"2026-10-22T08:00:00-03:00",
+   "buyer":{"name":"Ministerio de Salud Pública y Bienestar Social"},
+   "planning":{"identifier":"445566","budget":{"budgetBreakdown":[{"sourceParty":{"name":"Banco Interamericano de Desarrollo - BID"}}]}},
+   "tender":{"id":"445566","title":"Consultoría para evaluación de impacto del programa de salud materna","status":"active",
+    "description":"Servicios de consultoría para evaluación de impacto con encuesta a hogares en 5 departamentos. Se admiten firmas extranjeras en consorcio con firmas nacionales.",
+    "procurementMethodDetails":"Concurso de Ofertas","value":{"amount":850000000,"currency":"PYG"},
+    "tenderPeriod":{"startDate":"2026-10-22T08:00:00-03:00","endDate":"2026-11-20T10:00:00-03:00"},
+    "items":[{"description":"Servicio de consultoría - evaluación"}]}}},
+  {"compiledRelease":{"ocid":"ocds-03ad3f-445999","tender":{"id":"445999","title":"Adquisición de medicamentos","status":"cancelled"}}}
+ ]}

@@ -1,0 +1,144 @@
+rules_version = '2';
+
+// Firestore Rules del radar (RF-10 y tabla de permisos por rol de la spec).
+//
+// Sin email verificado de @equipos.com.uy y un rol en los custom claims no se lee nada.
+// La cuenta de servicio del pipeline y las Cloud Functions usan el Admin SDK y no pasan por estas reglas.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── identidad y roles ──
+    function dominio() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('^[^@]+@equipos[.]com[.]uy$');
+    }
+    function rol() { return request.auth.token.get('rol', ''); }
+    function conRol() { return dominio() && rol() in ['admin', 'editor', 'lector']; }
+    function esEditor() { return dominio() && rol() in ['admin', 'editor']; }
+    function esAdmin() { return dominio() && rol() == 'admin'; }
+    function autorEsQuienEscribe() { return request.resource.data.actualizadoPor == request.auth.token.email; }
+
+    function cambia() { return request.resource.data.diff(resource.data).affectedKeys(); }
+
+    // ── oportunidades ──
+    function estadoValido(d) {
+      return d.estado in ['nueva', 'analizando', 'postular', 'presentada', 'evaluacion', 'ganada', 'perdida', 'descartada'];
+    }
+    // Descartar exige un motivo de la lista cerrada; “otro” exige texto.
+    function motivoValido(d) {
+      return d.estado != 'descartada' || (
+        d.motivoDescarte is map
+        && d.motivoDescarte.codigo in ['fuera_rubro', 'monto', 'pais', 'requisitos', 'plazo', 'otro']
+        && (d.motivoDescarte.codigo != 'otro'
+            || (d.motivoDescarte.get('texto', '') is string && d.motivoDescarte.get('texto', '').size() > 0))
+      );
+    }
+    // El historial solo crece (arrayUnion): así, si dos editores cambian a la vez, quedan las dos entradas.
+    function historialSoloCrece() {
+      return !('historial' in cambia())
+        || (request.resource.data.historial is list
+            && request.resource.data.historial.size() >= resource.data.get('historial', []).size());
+    }
+    function edicionDeEditor() {
+      return cambia().hasOnly(['estado', 'estadoFecha', 'motivoDescarte', 'nota', 'historial', 'actualizado', 'actualizadoPor'])
+        && estadoValido(request.resource.data)
+        && motivoValido(request.resource.data)
+        && historialSoloCrece()
+        && (!('nota' in cambia()) || (request.resource.data.nota is string && request.resource.data.nota.size() <= 5000))
+        && autorEsQuienEscribe();
+    }
+    function altaManual(id) {
+      let d = request.resource.data;
+      return id.matches('^manual-[a-z0-9-]+$')
+        && d.docId == id
+        && d.manual == true
+        && d.orgId == 'equipos'
+        && d.titulo is string && d.titulo.size() > 0 && d.titulo.size() <= 500
+        && d.organismo is string && d.organismo.size() > 0 && d.organismo.size() <= 300
+        && d.pais in ['Uruguay', 'Paraguay']
+        && d.canal in ['BEO', 'CAF', 'correo', 'contacto', 'otro']
+        && estadoValido(d)
+        && motivoValido(d)
+        && autorEsQuienEscribe();
+    }
+
+    match /oportunidades/{id} {
+      allow read: if conRol();
+      allow create: if esAdmin() || (esEditor() && altaManual(id));
+      allow update: if esAdmin() || (esEditor() && edicionDeEditor());
+      allow delete: if esAdmin();
+    }
+
+    // ── configuración ──
+    function listaValida(d, campo) {
+      return !(campo in d) || (d[campo] is list && d[campo].size() <= 200);
+    }
+    function configValida(id) {
+      let d = request.resource.data;
+      return autorEsQuienEscribe()
+        && (id != 'busqueda' || (
+          listaValida(d, 'incluir') && listaValida(d, 'excluir') && listaValida(d, 'excluirRubros')
+          && (!('umbrales' in d) || (d.umbrales.alta is number && d.umbrales.media is number
+                                     && d.umbrales.alta > d.umbrales.media && d.umbrales.media >= 0
+                                     && d.umbrales.alta <= 100))))
+        && (id != 'sistema' || listaValida(d, 'destinatariosExtra'));
+    }
+
+    match /config/{id} {
+      allow read: if esEditor();
+      allow create, update: if esAdmin() && id in ['perfil', 'busqueda', 'sistema'] && configValida(id);
+      allow delete: if false;
+    }
+
+    // ── fuentes y corridas ──
+    match /fuentes/{id} {
+      allow read: if conRol();
+      allow update: if esAdmin()
+        && cambia().hasOnly(['activa', 'metodo', 'url', 'rubros', 'resourceId', 'ventanaDias',
+                             'actualizado', 'actualizadoPor', 'orgId'])
+        && request.resource.data.activa is bool
+        && request.resource.data.metodo in ['http', 'navegador', 'agente_local', 'manual']
+        && autorEsQuienEscribe();
+      allow create, delete: if false;
+    }
+
+    match /corridas/{id} {
+      allow read: if conRol();
+      allow write: if false;
+    }
+
+    // ── usuarios y auditoría ──
+    match /usuarios/{uid} {
+      // Cada uno lee su propio documento (para refrescar el token cuando cambia su rol).
+      allow read: if esAdmin() || (dominio() && request.auth.uid == uid);
+      allow write: if false;
+    }
+
+    match /auditoria/{id} {
+      allow read: if esAdmin();
+      allow write: if false;
+    }
+
+    // ── colecciones migradas y reservadas para fases siguientes ──
+    match /competidores/{id} {
+      allow read: if conRol();
+      allow write: if esAdmin();
+    }
+    match /propuestas/{id} {
+      allow read: if conRol();
+      allow write: if esEditor();
+    }
+    match /contactos/{id} {
+      allow read: if conRol();
+      allow write: if esEditor();
+    }
+    match /adjudicaciones/{id} {
+      allow read: if conRol();
+      allow write: if false;
+    }
+    match /postulaciones/{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

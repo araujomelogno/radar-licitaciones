@@ -1,0 +1,6 @@
+{"success":true,"result":{"records":[
+ {"_id":91,"notice_id":"UR-L1180-P003","notice_type":"Expresión de Interés","notice_title":"Encuesta nacional de juventudes y evaluación del programa",
+  "country":"Uruguay","publication_date":"2026-10-20","deadline":"2026-11-12","project_number":"UR-L1180","executing_agency":"INJU - MIDES",
+  "url":"https://www.iadb.org/es/project/UR-L1180"},
+ {"_id":92,"notice_id":"AR-L1200-P001","notice_type":"Expresión de Interés","notice_title":"Encuesta en Argentina","country":"Argentina","publication_date":"2026-10-20"}
+]}}
