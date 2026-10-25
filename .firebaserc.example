@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "staging": "equipos-radar-staging",
+    "prod": "equipos-radar-prod"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "oportunidades",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "estadoFecha", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "oportunidades",
+      "fieldPath": "texto",
+      "indexes": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{"uri":"https://www.comprasestatales.gub.uy/ocds/release/llamado-1378357","publishedDate":"2026-10-23T10:15:00-03:00",
+ "releases":[{"ocid":"ocds-yfs5dr-1378357","id":"llamado-1378357","date":"2026-10-23T10:15:00-03:00","tag":["tender"],
+  "buyer":{"id":"UY-RUT-123","name":"Ministerio de Desarrollo Social"},
+  "tender":{"id":"1378357","title":"Licitación Abreviada 45/2026","description":"Contratación de una firma consultora para realizar una encuesta de hogares y línea de base del programa Uruguay Impulsa",
+   "procurementMethodDetails":"Licitación Abreviada","status":"active",
+   "tenderPeriod":{"startDate":"2026-10-23T10:15:00-03:00","endDate":"2026-11-14T14:00:00-03:00"},
+   "value":{"amount":4500000,"currency":"UYU"},
+   "items":[{"id":"1","description":"Servicio de encuesta a hogares, trabajo de campo y procesamiento"}],
+   "documents":[{"id":"pliego","url":"https://www.comprasestatales.gub.uy/consultas/detalle/id/1378357"}]}}]}

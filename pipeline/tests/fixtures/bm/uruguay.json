@@ -1,0 +1,9 @@
+{"rows":2,"os":0,"total":2,"procnotices":[
+ {"id":"OP00473712","notice_type":"Request for Expression of Interest","notice_status":"Published",
+  "bid_description":"Impact evaluation and household survey for the Uruguay Social Inclusion Program",
+  "project_ctry_name":"Uruguay","project_name":"Uruguay Social Inclusion Program","project_id":"P178901",
+  "noticedate":"2026-10-21T00:00:00Z","submission_deadline_date":"2026-11-10T00:00:00Z","submission_deadline_time":"17:00",
+  "contact_organization":"Ministerio de Economía y Finanzas","bid_reference_no":"UY-MEF-123-CS-QCBS",
+  "notice_text":"<p>The Ministry invites eligible consulting firms to indicate their interest in providing the services (household survey and impact evaluation).</p>","notice_lang_name":"English"},
+ {"id":"OP00460000","notice_type":"Contract Award","noticedate":"2026-10-21T00:00:00Z","project_ctry_name":"Uruguay"}
+]}

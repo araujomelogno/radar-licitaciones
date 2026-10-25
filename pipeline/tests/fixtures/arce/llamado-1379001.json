@@ -1,0 +1,4 @@
+{"releases":[{"ocid":"ocds-yfs5dr-1379001","id":"llamado-1379001","date":"2026-10-24T09:00:00-03:00","tag":["tender"],
+  "parties":[{"name":"UTEC - Universidad Tecnológica","roles":["buyer","procuringEntity"]}],
+  "tender":{"id":"1379001","title":"Compra Directa 120/2026","description":"Estudio de satisfacción de estudiantes",
+   "tenderPeriod":{"endDate":"2026-11-05"},"items":[]}}]}

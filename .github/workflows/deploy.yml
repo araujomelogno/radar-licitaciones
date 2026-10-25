@@ -1,0 +1,132 @@
+name: Deploy
+
+# push a main          → staging
+# tag v*               → producción
+# manual (dispatch)    → el entorno elegido (por defecto, producción)
+#
+# Cada entorno de GitHub (staging y production) define estas variables (Settings → Environments):
+#   GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOYER_SA, FIREBASE_PROJECT
+#   VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+#   VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID, VITE_FIREBASE_APP_ID
+# y, para la evaluación en CI (solo staging), GCP_EVAL_SA.
+# La autenticación es por Workload Identity Federation: no hay claves de servicio.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      entorno:
+        description: Entorno a desplegar
+        type: choice
+        options: [production, staging]
+        default: production
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  REGION: southamerica-east1
+  AR_REPO: radar
+  IMAGEN: radar-pipeline
+  # Tiene que coincidir con var.fuentes de infra/variables.tf.
+  RADAR_FUENTES: arce,im,dncp,bm,bid,ungm,cnd,auci,fiap,ceibal
+
+jobs:
+  deploy:
+    name: Deploy a ${{ github.event_name == 'workflow_dispatch' && inputs.entorno || (github.ref_type == 'tag' && 'production' || 'staging') }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.entorno || (github.ref_type == 'tag' && 'production' || 'staging') }}
+    concurrency:
+      group: deploy-${{ github.event_name == 'workflow_dispatch' && inputs.entorno || (github.ref_type == 'tag' && 'production' || 'staging') }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SA }}
+          create_credentials_file: true
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # ── Pipeline: imagen, Cloud Run Jobs y workflow ──
+
+      - name: Construir y publicar la imagen del pipeline
+        id: imagen
+        env:
+          PROYECTO: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          base="${REGION}-docker.pkg.dev/${PROYECTO}/${AR_REPO}/${IMAGEN}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "${base}:${GITHUB_SHA}" pipeline
+          docker push "${base}:${GITHUB_SHA}"
+          digest=$(gcloud artifacts docker images describe "${base}:${GITHUB_SHA}" --format='value(image_summary.digest)')
+          echo "ref=${base}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Imagen: ${base}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Actualizar los Cloud Run Jobs
+        env:
+          PROYECTO: ${{ vars.GCP_PROJECT_ID }}
+          IMAGEN_REF: ${{ steps.imagen.outputs.ref }}
+        run: |
+          set -euo pipefail
+          jobs="radar-control radar-probar-acceso"
+          for f in ${RADAR_FUENTES//,/ }; do jobs="$jobs radar-collector-$f"; done
+          for j in $jobs; do
+            gcloud run jobs update "$j" --project "$PROYECTO" --region "$REGION" --image "$IMAGEN_REF" --quiet
+          done
+
+      - name: Desplegar el workflow de la corrida
+        env:
+          PROYECTO: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          gcloud workflows deploy radar-corrida \
+            --project "$PROYECTO" \
+            --location "$REGION" \
+            --source workflows/corrida.yaml \
+            --service-account "radar-workflow@${PROYECTO}.iam.gserviceaccount.com" \
+            --call-log-level log-errors-only \
+            --set-env-vars "RADAR_FUENTES=${RADAR_FUENTES},RADAR_CONTROL_JOB=radar-control"
+
+      # ── Firebase: hosting, reglas, índices y functions ──
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build de la app web
+        working-directory: web
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+          VITE_FUNCTIONS_REGION: southamerica-east1
+        run: |
+          npm ci
+          npm run build
+
+      - name: Instalar y compilar las functions
+        working-directory: functions
+        run: |
+          npm ci
+          npm run build
+
+      - name: firebase deploy
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+          FIREBASE_PROJECT: ${{ vars.FIREBASE_PROJECT }}
+        run: |
+          npx --yes firebase-tools@14 deploy \
+            --project "$FIREBASE_PROJECT" \
+            --only hosting,firestore:rules,firestore:indexes,functions \
+            --non-interactive --force

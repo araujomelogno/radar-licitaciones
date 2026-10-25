@@ -1,0 +1,342 @@
+# Workflow radar-corrida · corrida diaria del radar (RF-01)
+#
+# Entrada (todo opcional): {"corridaId": "...", "disparo": "programada|manual", "solicitadoPor": "email"}
+#   - Cloud Scheduler lo dispara a las 06:00 de Montevideo con {"disparo": "programada"}.
+#   - La Cloud Function lanzarCorrida lo dispara con corridaId (ya tomó el lock), disparo "manual"
+#     y el email del admin.
+#
+# Pasos: iniciar → collectors en paralelo → consolidar → prefiltrar → clasificar → cerrar.
+# Se degrada por partes: una fuente que agota sus reintentos queda en "error" y la corrida
+# sigue (termina en "parcial"). Una falla en otro paso cierra la corrida con el detalle y
+# hace fallar la ejecución, lo que dispara la alerta de Cloud Monitoring.
+#
+# Variables de entorno del workflow (las define Terraform):
+#   RADAR_FUENTES      ids de fuentes separados por coma
+#   RADAR_CONTROL_JOB  nombre del job de control (radar-control)
+
+main:
+  params: [args]
+  steps:
+    - normalizarEntrada:
+        switch:
+          - condition: ${args == null}
+            assign:
+              - args: {}
+
+    - preparar:
+        assign:
+          - proyecto: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${sys.get_env("GOOGLE_CLOUD_LOCATION")}
+          - ejecucion: ${sys.get_env("GOOGLE_CLOUD_WORKFLOW_EXECUTION_ID")}
+          - jobControl: ${sys.get_env("RADAR_CONTROL_JOB")}
+          - fuentes: ${text.split(sys.get_env("RADAR_FUENTES"), ",")}
+          - disparo: ${default(map.get(args, "disparo"), "programada")}
+          - solicitadoPor: ${default(map.get(args, "solicitadoPor"), "")}
+          - corridaId: ${default(map.get(args, "corridaId"), "")}
+          - etapa: "iniciar"
+
+    - generarId:
+        switch:
+          - condition: ${corridaId == ""}
+            steps:
+              - horaLocal:
+                  assign:
+                    # RFC 3339 en hora de Montevideo, por ejemplo 2026-10-25T06:00:03.123-03:00
+                    - ts: ${time.format(sys.now(), "America/Montevideo")}
+              - armarId:
+                  assign:
+                    - corridaId: ${text.substring(ts, 0, 4) + text.substring(ts, 5, 7) + text.substring(ts, 8, 10) + "-" + text.substring(ts, 11, 13) + text.substring(ts, 14, 16) + text.substring(ts, 17, 19) + "-" + disparo}
+
+    - logInicio:
+        call: sys.log
+        args:
+          severity: INFO
+          json:
+            evento: corrida_workflow_inicio
+            corridaId: ${corridaId}
+            disparo: ${disparo}
+            ejecucion: ${ejecucion}
+
+    # ── 1. Iniciar: toma el lock corridas/actual y crea corridas/{id} ──
+    - armarArgsIniciar:
+        assign:
+          - argsIniciar: ["iniciar", "--corrida-id", "${corridaId}", "--disparo", "${disparo}", "--ejecucion", "${ejecucion}"]
+    - agregarSolicitante:
+        switch:
+          - condition: ${solicitadoPor != ""}
+            assign:
+              - argsIniciar: ${list.concat(list.concat(argsIniciar, "--solicitado-por"), solicitadoPor)}
+
+    - iniciar:
+        try:
+          call: correr_job
+          args:
+            proyecto: ${proyecto}
+            region: ${region}
+            job: ${jobControl}
+            argumentos: ${argsIniciar}
+        except:
+          as: e
+          steps:
+            # iniciar sale con código 3 si otra corrida tiene el lock. En vez de depender del
+            # mensaje de error, se mira quién tiene el lock.
+            - leerLock:
+                call: leer_lock
+                args:
+                  proyecto: ${proyecto}
+                result: duenioLock
+            - decidirRechazo:
+                switch:
+                  - condition: ${duenioLock != "" and duenioLock != corridaId}
+                    steps:
+                      - logRechazada:
+                          call: sys.log
+                          args:
+                            severity: WARNING
+                            json:
+                              evento: corrida_rechazada
+                              corridaId: ${corridaId}
+                              corridaEnCurso: ${duenioLock}
+                      - terminarRechazada:
+                          return:
+                            corridaId: ${corridaId}
+                            estado: "rechazada"
+                            corridaEnCurso: ${duenioLock}
+            - falloIniciar:
+                raise: ${e}
+
+    # ── 2. Collectors en paralelo, cada uno con 2 reintentos y espera creciente ──
+    - collectors:
+        parallel:
+          for:
+            value: fuente
+            in: ${fuentes}
+            steps:
+              - correrCollector:
+                  try:
+                    call: correr_collector
+                    args:
+                      proyecto: ${proyecto}
+                      region: ${region}
+                      fuente: ${fuente}
+                      corridaId: ${corridaId}
+                  except:
+                    as: e
+                    steps:
+                      - describirFuenteError:
+                          call: describir_error
+                          args:
+                            e: ${e}
+                          result: detalleFuente
+                      - logFuenteError:
+                          call: sys.log
+                          args:
+                            severity: ERROR
+                            json:
+                              evento: fuente_error
+                              corridaId: ${corridaId}
+                              fuente: ${fuente}
+                              detalle: ${detalleFuente}
+                      - marcarFuente:
+                          try:
+                            call: correr_job
+                            args:
+                              proyecto: ${proyecto}
+                              region: ${region}
+                              job: ${jobControl}
+                              argumentos: ["marcar-fuente", "--corrida-id", "${corridaId}", "--fuente", "${fuente}", "--estado", "error", "--detalle", "${detalleFuente}"]
+                          except:
+                            as: e2
+                            steps:
+                              # Si ni siquiera se pudo marcar, cerrar igual lo detecta: la
+                              # fuente queda sin resultado en corridas/{id} y se cuenta como error.
+                              - logMarcarFallo:
+                                  call: sys.log
+                                  args:
+                                    severity: ERROR
+                                    json:
+                                      evento: marcar_fuente_fallo
+                                      corridaId: ${corridaId}
+                                      fuente: ${fuente}
+                                      detalle: ${e2}
+
+    # ── 3 a 6. Consolidar, prefiltrar, clasificar y cerrar ──
+    - procesar:
+        try:
+          steps:
+            - consolidar:
+                assign:
+                  - etapa: "consolidar"
+            - correrConsolidar:
+                call: correr_job
+                args:
+                  proyecto: ${proyecto}
+                  region: ${region}
+                  job: ${jobControl}
+                  argumentos: ["consolidar", "--corrida-id", "${corridaId}"]
+            - prefiltrar:
+                assign:
+                  - etapa: "prefiltrar"
+            - correrPrefiltrar:
+                call: correr_job
+                args:
+                  proyecto: ${proyecto}
+                  region: ${region}
+                  job: ${jobControl}
+                  argumentos: ["prefiltrar", "--corrida-id", "${corridaId}"]
+            - clasificar:
+                assign:
+                  - etapa: "clasificar"
+            - correrClasificar:
+                call: correr_job
+                args:
+                  proyecto: ${proyecto}
+                  region: ${region}
+                  job: ${jobControl}
+                  argumentos: ["clasificar", "--corrida-id", "${corridaId}"]
+            - cerrar:
+                assign:
+                  - etapa: "cerrar"
+            - correrCerrar:
+                call: correr_job
+                args:
+                  proyecto: ${proyecto}
+                  region: ${region}
+                  job: ${jobControl}
+                  argumentos: ["cerrar", "--corrida-id", "${corridaId}"]
+        except:
+          as: e
+          steps:
+            - describirFalla:
+                call: describir_error
+                args:
+                  e: ${e}
+                result: detalleFalla
+            - logFalla:
+                call: sys.log
+                args:
+                  severity: ERROR
+                  json:
+                    evento: corrida_fallo
+                    corridaId: ${corridaId}
+                    etapa: ${etapa}
+                    detalle: ${detalleFalla}
+            - cerrarConFalla:
+                try:
+                  call: correr_job
+                  args:
+                    proyecto: ${proyecto}
+                    region: ${region}
+                    job: ${jobControl}
+                    argumentos: ["cerrar", "--corrida-id", "${corridaId}", "--fallo", "${etapa + ': ' + detalleFalla}"]
+                except:
+                  as: e2
+                  steps:
+                    - logCierreFallo:
+                        call: sys.log
+                        args:
+                          severity: ERROR
+                          json:
+                            evento: cierre_con_falla_fallo
+                            corridaId: ${corridaId}
+                            detalle: ${e2}
+            - relanzar:
+                raise: ${e}
+
+    - fin:
+        return:
+          corridaId: ${corridaId}
+          estado: "terminada"
+
+
+# Ejecuta un Cloud Run Job con argumentos propios y espera a que termine.
+# Si la ejecución falla (código de salida distinto de 0), el conector lanza una excepción.
+correr_job:
+  params: [proyecto, region, job, argumentos]
+  steps:
+    - ejecutar:
+        call: googleapis.run.v2.projects.locations.jobs.run
+        args:
+          name: ${"projects/" + proyecto + "/locations/" + region + "/jobs/" + job}
+          body:
+            overrides:
+              containerOverrides:
+                - args: ${argumentos}
+          connector_params:
+            timeout: 1200
+        result: resultado
+    - devolver:
+        return: ${resultado}
+
+
+# Collector de una fuente: 2 reintentos (3 intentos en total) con espera creciente.
+correr_collector:
+  params: [proyecto, region, fuente, corridaId]
+  steps:
+    - ejecutar:
+        try:
+          call: correr_job
+          args:
+            proyecto: ${proyecto}
+            region: ${region}
+            job: ${"radar-collector-" + fuente}
+            argumentos: ["collect", "--fuente", "${fuente}", "--corrida-id", "${corridaId}"]
+          result: resultado
+        retry:
+          predicate: ${reintentar_siempre}
+          max_retries: 2
+          backoff:
+            initial_delay: 30
+            max_delay: 120
+            multiplier: 2
+    - devolver:
+        return: ${resultado}
+
+
+reintentar_siempre:
+  params: [e]
+  steps:
+    - si:
+        return: true
+
+
+# Devuelve el corridaId que tiene el lock corridas/actual, o "" si no hay lock.
+leer_lock:
+  params: [proyecto]
+  steps:
+    - leer:
+        try:
+          call: googleapis.firestore.v1.projects.databases.documents.get
+          args:
+            name: ${"projects/" + proyecto + "/databases/(default)/documents/corridas/actual"}
+          result: doc
+        except:
+          as: e
+          steps:
+            - sinLock:
+                return: ""
+    - extraer:
+        return: ${default(map.get(doc, ["fields", "corridaId", "stringValue"]), "")}
+
+
+# Texto corto y legible de una excepción, para logs y para corridas/{id}.
+describir_error:
+  params: [e]
+  steps:
+    - armar:
+        switch:
+          - condition: ${get_type(e) == "string"}
+            assign:
+              - texto: ${e}
+          - condition: ${get_type(e) == "map"}
+            assign:
+              - texto: ${default(map.get(e, "message"), json.encode_to_string(e))}
+          - condition: true
+            assign:
+              - texto: ${json.encode_to_string(e)}
+    - cortar:
+        switch:
+          - condition: ${len(texto) > 400}
+            return: ${text.substring(texto, 0, 400)}
+    - devolver:
+        return: ${texto}
